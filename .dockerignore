@@ -28,3 +28,4 @@ secrets/
 *.swo
 *~
 .DS_Store
+hf-cache/
