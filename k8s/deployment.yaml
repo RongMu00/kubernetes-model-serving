@@ -1,0 +1,32 @@
+# Session 4 runs one model-serving replica in a local kind cluster.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-serving-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-serving-api
+  template:
+    metadata:
+      labels:
+        app: model-serving-api
+    spec:
+      containers:
+        - name: model-serving-api
+          image: model-serving-api:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8000
+          env:
+            - name: HF_HOME
+              value: /models/cache
+            - name: MODEL_ID
+              value: Qwen/Qwen2.5-0.5B-Instruct
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models/cache
+      volumes:
+        - name: model-cache
+          emptyDir: {}

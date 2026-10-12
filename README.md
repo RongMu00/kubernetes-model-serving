@@ -171,3 +171,102 @@ docker ps -a --filter volume=hf-cache
 docker rm -f <container_id_or_name>
 docker volume rm hf-cache
 ```
+
+## Run on local Kubernetes with kind
+
+Session 4 runs the same image as one Kubernetes Deployment replica. [kind](https://kind.sigs.k8s.io/) creates a local learning cluster whose Kubernetes nodes are Docker containers on your laptop. It is not the production platform: a later session will use Amazon EKS instead of kind.
+
+Install Docker, `kind`, and `kubectl`, then build the image on the host before creating the workload:
+
+```sh
+docker build -t model-serving-api .
+docker image inspect model-serving-api:latest
+```
+
+Create a cluster named `model-serving`. kind merges its access details into `~/.kube/config` and names the context `kind-model-serving`:
+
+```sh
+kind create cluster --name model-serving
+kubectl config current-context
+kind get kubeconfig --name model-serving
+kubectl config use-context kind-model-serving
+kubectl cluster-info
+kind get clusters
+```
+
+Load the locally built image into the kind node, then create the Deployment:
+
+```sh
+kind load docker-image model-serving-api:latest --name model-serving
+kubectl apply -f k8s/deployment.yaml
+kubectl get deploy,rs,pods
+kubectl get deploy model-serving-api
+kubectl describe deploy model-serving-api
+kubectl describe pod -l app=model-serving-api
+```
+
+`kind load` copies the Docker image into the kind node. It does not copy the host Docker volume `hf-cache`. This Deployment uses an `emptyDir` model cache, which is created for the Pod and deleted with that Pod. The first Pod therefore downloads approximately 1 GB of model files.
+
+Follow the application logs and wait for `model_load_complete`:
+
+```sh
+kubectl logs -f deploy/model-serving-api
+```
+
+A Pod being `Running` only means its container is running. It does not mean the model is ready because this session intentionally has no readiness probe.
+
+In a second terminal, forward local port 8000 directly to the Deployment. There is no Service in this session:
+
+```sh
+kubectl port-forward deploy/model-serving-api 8000:8000
+```
+
+Call the health and generation endpoints:
+
+```sh
+curl -s http://localhost:8000/health
+
+curl -X POST http://localhost:8000/v1/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Explain Kubernetes in one sentence.","max_new_tokens":32}'
+```
+
+The health response is `{"status":"ok"}`. Generation returns real Qwen text and `"model":"Qwen/Qwen2.5-0.5B-Instruct"`.
+
+### Observe self-healing
+
+Delete the managed Pod and watch the Deployment's ReplicaSet create a replacement automatically:
+
+```sh
+kubectl get pods -l app=model-serving-api
+kubectl delete pod -l app=model-serving-api
+kubectl get pods -w
+```
+
+The replacement has a new Pod name; no second `kubectl apply` is needed. The old port-forward ends when its Pod disappears, so start it again if needed. Because `emptyDir` belonged to the deleted Pod, the replacement may download or load Qwen again.
+
+If a Pod reports `ImagePullBackOff`, the host image was not loaded into this cluster. Load it and recreate the Pod:
+
+```sh
+kind load docker-image model-serving-api:latest --name model-serving
+kubectl delete pod -l app=model-serving-api
+```
+
+### Kubernetes cleanup
+
+Remove the workload, then delete the entire local cluster:
+
+```sh
+kubectl delete -f k8s/deployment.yaml
+kind delete cluster --name model-serving
+kind get clusters
+```
+
+Confirm that `model-serving` is absent from the final cluster list. The host image can remain, and the host `hf-cache` volume is separate from kind.
+
+These cleanup commands operate at different layers:
+
+- `docker rm` removes a Docker container on the host; it is not how Kubernetes workloads are managed.
+- `kubectl delete pod` removes one Pod, but its Deployment and ReplicaSet immediately create a replacement to maintain one replica.
+- `kubectl delete -f k8s/deployment.yaml` removes the Deployment and its managed ReplicaSet and Pod.
+- `kind delete cluster` removes the local Kubernetes cluster and its Docker node containers.
